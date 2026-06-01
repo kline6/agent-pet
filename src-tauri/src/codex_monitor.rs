@@ -8,7 +8,6 @@ use serde_json::Value;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tauri::async_runtime::Mutex;
@@ -37,19 +36,13 @@ impl CodexMonitor {
     pub async fn run(&self) {
         let mut codex_cursor = FileCursor::default();
         let mut claude_cursor = FileCursor::default();
-        let mut opencode_cursor = OpencodeCursor::default();
-        let mut openclaw_cursor = FileCursor::default();
-        let mut hermes_cursor = FileCursor::default();
 
         loop {
-            let (codex_path, claude_path, opencode_path, openclaw_path, hermes_path) = {
+            let (codex_path, claude_path) = {
                 let sm = self.state_machine.lock().await;
                 (
                     expand_source_path(sm.live_source_path("codex")),
                     expand_source_path(sm.live_source_path("claude")),
-                    expand_source_path(sm.live_source_path("opencode")),
-                    expand_source_path(sm.live_source_path("openclaw")),
-                    expand_source_path(sm.live_source_path("hermes")),
                 )
             };
 
@@ -83,44 +76,6 @@ impl CodexMonitor {
                 }
             }
 
-            if let Some(db_path) = opencode_path.as_deref().filter(|path| path.exists()) {
-                if let Err(e) =
-                    poll_opencode_source(db_path, &mut opencode_cursor, &self.state_machine).await
-                {
-                    log::warn!("opencode monitor poll failed: {}", e);
-                }
-            }
-
-            if let Some(sessions_root) = openclaw_path.as_deref() {
-                if let Err(e) = poll_jsonl_source(
-                    sessions_root,
-                    &mut openclaw_cursor,
-                    &self.state_machine,
-                    "openclaw",
-                    is_openclaw_session_file,
-                    openclaw_line_to_activity,
-                )
-                .await
-                {
-                    log::warn!("OpenClaw monitor poll failed: {}", e);
-                }
-            }
-
-            if let Some(sessions_root) = hermes_path.as_deref() {
-                if let Err(e) = poll_jsonl_source(
-                    sessions_root,
-                    &mut hermes_cursor,
-                    &self.state_machine,
-                    "hermes",
-                    is_hermes_session_file,
-                    hermes_line_to_activity,
-                )
-                .await
-                {
-                    log::warn!("Hermes monitor poll failed: {}", e);
-                }
-            }
-
             tokio::time::sleep(Duration::from_millis(700)).await;
         }
     }
@@ -130,12 +85,6 @@ impl CodexMonitor {
 struct FileCursor {
     path: Option<PathBuf>,
     offset: u64,
-}
-
-#[derive(Default)]
-struct OpencodeCursor {
-    last_time_created: i64,
-    initialized: bool,
 }
 
 async fn poll_jsonl_source(
@@ -323,17 +272,6 @@ fn is_jsonl_file(path: &Path) -> bool {
     path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
 }
 
-fn is_openclaw_session_file(path: &Path) -> bool {
-    path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
-        && path
-            .components()
-            .any(|component| component.as_os_str() == "sessions")
-}
-
-fn is_hermes_session_file(path: &Path) -> bool {
-    path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
-}
-
 #[cfg(test)]
 fn codex_line_to_message_type(line: &str) -> Option<&'static str> {
     codex_line_to_activity(line).map(|activity| activity.message_type)
@@ -484,229 +422,6 @@ fn claude_line_to_activity(line: &str) -> Option<CodexActivity> {
     }
 }
 
-fn openclaw_line_to_activity(line: &str) -> Option<CodexActivity> {
-    let value: Value = serde_json::from_str(line).ok()?;
-    if value.get("type")?.as_str()? != "message" {
-        return None;
-    }
-
-    let message = value.get("message")?;
-    match message.get("role").and_then(Value::as_str) {
-        Some("user") => Some(CodexActivity {
-            message_type: MSG_MENTION,
-            bubble_text: openclaw_message_text(message).or_else(|| Some("New request".to_string())),
-            origin: ActivityOrigin::User,
-        }),
-        Some("assistant") => {
-            let text = openclaw_message_text(message);
-            let has_tool_call = message_has_openclaw_tool_call(message);
-
-            if let Some(text) = text {
-                Some(CodexActivity {
-                    message_type: MSG_NEW_MESSAGE,
-                    bubble_text: Some(text),
-                    origin: ActivityOrigin::Assistant,
-                })
-            } else if message.get("stopReason").and_then(Value::as_str) == Some("error") {
-                Some(activity(MSG_ERROR, "Something failed"))
-            } else if has_tool_call {
-                Some(activity(MSG_PROCESSING, "Working..."))
-            } else {
-                Some(activity(MSG_SUCCESS, "Done"))
-            }
-        }
-        _ => None,
-    }
-}
-
-fn hermes_line_to_activity(line: &str) -> Option<CodexActivity> {
-    let value: Value = serde_json::from_str(line).ok()?;
-    let record_type = value
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("message");
-
-    match record_type {
-        "session" | "model_change" | "thinking_level_change" | "custom" => None,
-        "message" => {
-            let message = value.get("message").unwrap_or(&value);
-            match message.get("role").and_then(Value::as_str) {
-                Some("user") => Some(CodexActivity {
-                    message_type: MSG_MENTION,
-                    bubble_text: hermes_message_text(message)
-                        .or_else(|| Some("New request".to_string())),
-                    origin: ActivityOrigin::User,
-                }),
-                Some("assistant") => {
-                    if message.get("model").and_then(Value::as_str) == Some("delivery-mirror")
-                        || message.get("provider").and_then(Value::as_str) == Some("openclaw")
-                            && message.get("model").and_then(Value::as_str)
-                                == Some("delivery-mirror")
-                    {
-                        return None;
-                    }
-
-                    let text = hermes_message_text(message);
-                    let has_tool_call = message_has_openclaw_tool_call(message);
-
-                    if let Some(text) = text {
-                        Some(CodexActivity {
-                            message_type: MSG_NEW_MESSAGE,
-                            bubble_text: Some(text),
-                            origin: ActivityOrigin::Assistant,
-                        })
-                    } else if message.get("stopReason").and_then(Value::as_str) == Some("error") {
-                        Some(activity(MSG_ERROR, "Something failed"))
-                    } else if has_tool_call {
-                        Some(activity(MSG_PROCESSING, "Working..."))
-                    } else {
-                        Some(activity(MSG_SUCCESS, "Done"))
-                    }
-                }
-                Some("tool") => Some(activity(MSG_PROCESSING, "Using tool...")),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
-async fn poll_opencode_source(
-    db_path: &Path,
-    cursor: &mut OpencodeCursor,
-    state_machine: &Arc<Mutex<PetStateMachine>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let rows = if cursor.initialized {
-        query_opencode_rows(db_path, Some(cursor.last_time_created))?
-    } else {
-        let rows = query_opencode_latest_row(db_path)?;
-        cursor.initialized = true;
-        rows
-    };
-
-    for row in rows {
-        cursor.last_time_created = cursor.last_time_created.max(row.time_created);
-        if let Some(activity) = opencode_row_to_activity(&row) {
-            emit_activity(state_machine, "opencode", activity).await;
-        }
-    }
-
-    Ok(())
-}
-
-struct OpencodeRow {
-    time_created: i64,
-    role: Option<String>,
-    part_type: Option<String>,
-    text: Option<String>,
-    data: Value,
-}
-
-fn query_opencode_rows(
-    db_path: &Path,
-    after_time_created: Option<i64>,
-) -> Result<Vec<OpencodeRow>, Box<dyn std::error::Error>> {
-    let condition = after_time_created
-        .map(|time| format!("where p.time_created > {}", time))
-        .unwrap_or_default();
-    let query = format!(
-        "select p.time_created as time_created, json_extract(m.data,'$.role') as role, json_extract(p.data,'$.type') as part_type, json_extract(p.data,'$.text') as text, p.data as data from part p join message m on m.id = p.message_id {} order by p.time_created asc limit 50;",
-        condition
-    );
-
-    run_opencode_query(db_path, &query)
-}
-
-fn query_opencode_latest_row(
-    db_path: &Path,
-) -> Result<Vec<OpencodeRow>, Box<dyn std::error::Error>> {
-    run_opencode_query(
-        db_path,
-        "select p.time_created as time_created, json_extract(m.data,'$.role') as role, json_extract(p.data,'$.type') as part_type, json_extract(p.data,'$.text') as text, p.data as data from part p join message m on m.id = p.message_id where json_extract(m.data,'$.role') = 'assistant' and json_extract(p.data,'$.type') = 'text' and coalesce(json_extract(p.data,'$.text'),'') <> '' order by p.time_created desc limit 1;",
-    )
-}
-
-fn run_opencode_query(
-    db_path: &Path,
-    query: &str,
-) -> Result<Vec<OpencodeRow>, Box<dyn std::error::Error>> {
-    let output = Command::new("/usr/bin/sqlite3")
-        .arg("-json")
-        .arg(db_path)
-        .arg(query)
-        .output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("sqlite3 failed: {}", stderr).into());
-    }
-
-    let value: Value = serde_json::from_slice(&output.stdout)?;
-    let rows = value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|row| {
-            let data = row
-                .get("data")
-                .and_then(Value::as_str)
-                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())?;
-            Some(OpencodeRow {
-                time_created: row.get("time_created")?.as_i64()?,
-                role: row.get("role").and_then(Value::as_str).map(str::to_string),
-                part_type: row
-                    .get("part_type")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                text: row.get("text").and_then(Value::as_str).map(str::to_string),
-                data,
-            })
-        })
-        .collect();
-
-    Ok(rows)
-}
-
-fn opencode_row_to_activity(row: &OpencodeRow) -> Option<CodexActivity> {
-    let part_type = row.part_type.as_deref()?;
-
-    match part_type {
-        "text" => {
-            let text = row.text.as_deref()?.trim();
-            if text.is_empty() {
-                return None;
-            }
-
-            match row.role.as_deref() {
-                Some("user") => Some(CodexActivity {
-                    message_type: MSG_MENTION,
-                    bubble_text: Some(text.to_string()),
-                    origin: ActivityOrigin::User,
-                }),
-                Some("assistant") => Some(CodexActivity {
-                    message_type: MSG_NEW_MESSAGE,
-                    bubble_text: Some(text.to_string()),
-                    origin: ActivityOrigin::Assistant,
-                }),
-                _ => None,
-            }
-        }
-        "reasoning" | "step-start" => Some(activity(MSG_PROCESSING, "Working...")),
-        "step-finish" => match row.data.get("reason").and_then(Value::as_str) {
-            Some("stop") => Some(activity(MSG_SUCCESS, "Done")),
-            _ => Some(activity(MSG_PROCESSING, "Working...")),
-        },
-        "tool" => {
-            let state = row.data.get("state")?;
-            match state.get("status").and_then(Value::as_str) {
-                Some("error") | Some("failed") => Some(activity(MSG_ERROR, "Tool failed")),
-                _ => Some(activity(MSG_PROCESSING, "Using tool...")),
-            }
-        }
-        _ => None,
-    }
-}
-
 fn activity(message_type: &'static str, bubble_text: &str) -> CodexActivity {
     CodexActivity {
         message_type,
@@ -755,21 +470,6 @@ fn message_has_tool_use(message: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn message_has_openclaw_tool_call(message: &Value) -> bool {
-    message
-        .get("content")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items.iter().any(|item| {
-                matches!(
-                    item.get("type").and_then(Value::as_str),
-                    Some("toolCall" | "toolResult")
-                )
-            })
-        })
-        .unwrap_or(false)
-}
-
 fn format_source_bubble_text(source: &str, text: &str) -> String {
     truncate_bubble_text(&format!("{}: {}", source_label(source), text.trim()))
 }
@@ -778,9 +478,6 @@ fn source_label(source: &str) -> &str {
     match source {
         "codex" => "Codex",
         "claude" => "Claude Code",
-        "opencode" => "opencode",
-        "openclaw" => "OpenClaw",
-        "hermes" => "Hermes Agent",
         _ => source,
     }
 }
@@ -804,20 +501,6 @@ fn payload_last_agent_message(payload: &Value) -> Option<String> {
 fn response_message_text(payload: &Value) -> Option<String> {
     let content = payload.get("content")?;
     message_value_to_text(content).map(|text| truncate_bubble_text(text.trim()))
-}
-
-fn openclaw_message_text(message: &Value) -> Option<String> {
-    message
-        .get("content")
-        .and_then(|content| content_value_to_text(content))
-        .map(|text| truncate_bubble_text(text.trim()))
-}
-
-fn hermes_message_text(message: &Value) -> Option<String> {
-    message
-        .get("content")
-        .and_then(|content| content_value_to_text(content))
-        .map(|text| truncate_bubble_text(text.trim()))
 }
 
 fn message_value_to_text(value: &Value) -> Option<String> {
@@ -908,49 +591,5 @@ mod tests {
     fn ignores_unrelated_codex_events() {
         let line = r#"{"type":"event_msg","payload":{"type":"token_count"}}"#;
         assert_eq!(codex_line_to_message_type(line), None);
-    }
-
-    #[test]
-    fn extracts_openclaw_assistant_message_text_for_bubble() {
-        let line = r#"{"type":"message","id":"7d33653f","parentId":"4541d9a1","timestamp":"2026-03-13T12:47:12.949Z","message":{"role":"assistant","content":[{"type":"text","text":"It is a football player. Let me see if there are any other relevant results:"},{"type":"toolCall","id":"ollama_call_fc556e19-48ea-4ece-a09b-e4a3591a828c","name":"web_search","arguments":{"count":10,"query":"Lionell Messi"}}],"stopReason":"toolUse","api":"ollama","provider":"ollama","model":"glm-5:cloud","usage":{"input":23501,"output":220,"cacheRead":0,"cacheWrite":0,"totalTokens":23721,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"timestamp":1773406032947}}"#;
-        let activity = openclaw_line_to_activity(line).unwrap();
-        assert_eq!(activity.message_type, MSG_NEW_MESSAGE);
-        assert_eq!(
-            activity.bubble_text.as_deref(),
-            Some("It is a football player. Let me see if there are any other relevant results:")
-        );
-        assert_eq!(activity.origin, ActivityOrigin::Assistant);
-    }
-
-    #[test]
-    fn maps_openclaw_tool_call_only_to_processing() {
-        let line = r#"{"type":"message","id":"de807fc0","timestamp":"2026-02-27T05:45:19.968Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_auto_1","name":"search","arguments":{"query":"x"}}],"stopReason":"toolUse","api":"openai-completions","provider":"vllm","model":"vllm/gemma-3","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"timestamp":1772659796512}}"#;
-        let activity = openclaw_line_to_activity(line).unwrap();
-        assert_eq!(activity.message_type, MSG_PROCESSING);
-        assert_eq!(activity.bubble_text.as_deref(), Some("Working..."));
-        assert_eq!(activity.origin, ActivityOrigin::Assistant);
-    }
-
-    #[test]
-    fn extracts_hermes_assistant_message_text_for_bubble() {
-        let line = r#"{"role":"assistant","content":"I found the issue and will patch it now.","reasoning":"Need to inspect the local config first","finish_reason":"stop","timestamp":"2026-05-04T23:25:09.892976"}"#;
-        let activity = hermes_line_to_activity(line).unwrap();
-        assert_eq!(activity.message_type, MSG_NEW_MESSAGE);
-        assert_eq!(
-            activity.bubble_text.as_deref(),
-            Some("I found the issue and will patch it now.")
-        );
-        assert_eq!(activity.origin, ActivityOrigin::Assistant);
-    }
-
-    #[test]
-    fn maps_hermes_tool_call_only_to_processing_and_skips_delivery_mirror() {
-        let tool_line = r#"{"type":"message","id":"20260504_211412_ab12cd34","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_auto_1","name":"search","arguments":{"query":"x"}}],"provider":"anthropic","model":"claude-sonnet-4-6","stopReason":"toolUse"}}"#;
-        let mirror_line = r#"{"type":"message","id":"20260504_211412_ab12cd34","message":{"role":"assistant","content":[{"type":"text","text":"sent elsewhere"}],"provider":"openclaw","model":"delivery-mirror","stopReason":"stop"}}"#;
-        let activity = hermes_line_to_activity(tool_line).unwrap();
-        assert_eq!(activity.message_type, MSG_PROCESSING);
-        assert_eq!(activity.bubble_text.as_deref(), Some("Working..."));
-        assert_eq!(activity.origin, ActivityOrigin::Assistant);
-        assert!(hermes_line_to_activity(mirror_line).is_none());
     }
 }

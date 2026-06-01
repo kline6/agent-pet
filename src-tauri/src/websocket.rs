@@ -3,6 +3,7 @@
 
 use crate::message::PetMessage;
 use crate::state_machine::PetStateMachine;
+use tauri::Emitter;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tauri::async_runtime::Mutex;
@@ -12,13 +13,15 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 pub struct WebSocketServer {
     port: u16,
     state_machine: Arc<Mutex<PetStateMachine>>,
+    app_handle: tauri::AppHandle,
 }
 
 impl WebSocketServer {
-    pub fn new(port: u16, state_machine: Arc<Mutex<PetStateMachine>>) -> Self {
+    pub fn new(port: u16, state_machine: Arc<Mutex<PetStateMachine>>, app_handle: tauri::AppHandle) -> Self {
         Self {
             port,
             state_machine,
+            app_handle,
         }
     }
 
@@ -29,14 +32,14 @@ impl WebSocketServer {
 
         while let Ok((stream, _)) = listener.accept().await {
             let state_machine = self.state_machine.clone();
-            tokio::spawn(handle_connection(stream, state_machine));
+            tokio::spawn(handle_connection(stream, state_machine, self.app_handle.clone()));
         }
 
         Ok(())
     }
 }
 
-async fn handle_connection(stream: TcpStream, state_machine: Arc<Mutex<PetStateMachine>>) {
+async fn handle_connection(stream: TcpStream, state_machine: Arc<Mutex<PetStateMachine>>, app_handle: tauri::AppHandle) {
     let ws_stream = match accept_async(stream).await {
         Ok(ws) => ws,
         Err(e) => {
@@ -65,6 +68,39 @@ async fn handle_connection(stream: TcpStream, state_machine: Arc<Mutex<PetStateM
                 match serde_json::from_str::<PetMessage>(&text) {
                     Ok(pet_msg) => {
                         let mut sm = state_machine.lock().await;
+                        // Handle permission requests specially
+                        if pet_msg.message_type == "permission_request" {
+                            let text = pet_msg.payload.get("text")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Agent requests permission")
+                                .to_string();
+                            let callback_id = pet_msg.payload.get("callbackId")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let timeout = pet_msg.payload.get("timeout")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(30);
+                            let source = pet_msg.source.clone();
+
+                            let _ = app_handle.emit("permission-request", serde_json::json!({
+                                "text": text,
+                                "callbackId": callback_id,
+                                "source": source,
+                                "timeout": timeout,
+                            }));
+
+                            // Also switch to waiting state
+                            let new_state = sm.handle_websocket_message(&pet_msg.message_type);
+                            let ack = serde_json::json!({
+                                "type": "ack",
+                                "message_type": pet_msg.message_type,
+                                "current_state": new_state.map(|s| s.to_string()).unwrap_or_else(|| "idle".to_string()),
+                            });
+                            let _ = write.send(Message::Text(ack.to_string())).await;
+                            continue;
+                        }
+
                         match sm.handle_websocket_message(&pet_msg.message_type) {
                             Some(new_state) => {
                                 let ack = serde_json::json!({

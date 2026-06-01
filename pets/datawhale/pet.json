@@ -1,6 +1,62 @@
 {
-  "id": "datawhale",
-  "displayName": "DataWhale",
-  "description": "A tiny round blue whale digital pet with a white striped belly, little fins, a small tail, and soft sleepy expressions.",
-  "spritesheetPath": "spritesheet.webp"
+    "id":  "datawhale",
+    "displayName":  "DataWhale",
+    "description":  "A tiny round blue whale digital pet with a white striped belly, little fins, a small tail, and soft sleepy expressions.",
+    "spritesheetPath":  "spritesheet.webp",
+    "animations":  {
+                       "waiting":  {
+                                       "row":  6,
+                                       "loop":  true,
+                                       "frames":  6,
+                                       "fps":  4
+                                   },
+                       "jumping":  {
+                                       "row":  4,
+                                       "loop":  false,
+                                       "frames":  5,
+                                       "fps":  8
+                                   },
+                       "review":  {
+                                      "row":  8,
+                                      "loop":  true,
+                                      "frames":  6,
+                                      "fps":  4
+                                  },
+                       "running":  {
+                                       "row":  7,
+                                       "loop":  true,
+                                       "frames":  6,
+                                       "fps":  8
+                                   },
+                       "idle":  {
+                                    "row":  0,
+                                    "loop":  true,
+                                    "frames":  6,
+                                    "fps":  4
+                                },
+                       "running-right":  {
+                                             "row":  1,
+                                             "loop":  true,
+                                             "frames":  8,
+                                             "fps":  8
+                                         },
+                       "running-left":  {
+                                            "row":  2,
+                                            "loop":  true,
+                                            "frames":  8,
+                                            "fps":  8
+                                        },
+                       "waving":  {
+                                      "row":  3,
+                                      "loop":  false,
+                                      "frames":  4,
+                                      "fps":  6
+                                  },
+                       "failed":  {
+                                      "row":  5,
+                                      "loop":  false,
+                                      "frames":  8,
+                                      "fps":  6
+                                  }
+                   }
 }

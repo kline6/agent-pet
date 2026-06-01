@@ -2,5 +2,16 @@
   "id": "claude",
   "displayName": "Claude",
   "description": "A tiny orange blocky digital pet with stubby side arms, short legs, and a variety of cute expressions and poses in pixel-art style.",
-  "spritesheetPath": "spritesheet.webp"
+  "spritesheetPath": "spritesheet.webp",
+  "animations": {
+    "idle": { "row": 0, "frames": 6, "fps": 4, "loop": true },
+    "running-right": { "row": 1, "frames": 8, "fps": 8, "loop": true },
+    "running-left": { "row": 2, "frames": 8, "fps": 8, "loop": true },
+    "waving": { "row": 3, "frames": 4, "fps": 6, "loop": false },
+    "jumping": { "row": 4, "frames": 5, "fps": 8, "loop": false },
+    "failed": { "row": 5, "frames": 8, "fps": 6, "loop": false },
+    "waiting": { "row": 6, "frames": 6, "fps": 4, "loop": true },
+    "running": { "row": 7, "frames": 6, "fps": 8, "loop": true },
+    "review": { "row": 8, "frames": 6, "fps": 4, "loop": true }
+  }
 }

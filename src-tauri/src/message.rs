@@ -34,6 +34,7 @@ pub const MSG_WAVING: &str = "waving";
 pub const MSG_FAILED: &str = "failed";
 pub const MSG_WAITING: &str = "waiting";
 pub const MSG_REVIEW: &str = "review";
+pub const MSG_PERMISSION_REQUEST: &str = "permission_request";
 
 /// Default message map: message_type -> pet_state
 ///
@@ -47,6 +48,7 @@ pub fn default_message_map() -> std::collections::HashMap<String, String> {
     map.insert(MSG_PROCESSING.to_string(), "running".to_string());
     map.insert(MSG_WAITING_INPUT.to_string(), "waiting".to_string());
     map.insert(MSG_REVIEW_REQUIRED.to_string(), "review".to_string());
+    map.insert(MSG_PERMISSION_REQUEST.to_string(), "waiting".to_string());
     map.insert(MSG_SUCCESS.to_string(), "waving".to_string());
     map.insert(MSG_IDLE.to_string(), "idle".to_string());
     // Direct state triggers
@@ -117,6 +119,7 @@ mod tests {
             MSG_FAILED,
             MSG_WAITING,
             MSG_REVIEW,
+            MSG_PERMISSION_REQUEST,
         ];
         let set: std::collections::HashSet<&str> = constants.iter().copied().collect();
         assert_eq!(set.len(), constants.len(), "存在重复的消息类型常量");
@@ -142,6 +145,7 @@ mod tests {
             MSG_FAILED,
             MSG_WAITING,
             MSG_REVIEW,
+            MSG_PERMISSION_REQUEST,
         ];
         for key in &expected_keys {
             assert!(

@@ -67,6 +67,11 @@ function App() {
   const [currentFrame, setCurrentFrame] = useState(0)
   const [spritesheet, setSpritesheet] = useState('')
   const [isSettings, setIsSettings] = useState(false)
+  const [windowIdentity, setWindowIdentity] = useState('unknown')
+  const [debugLogs, setDebugLogs] = useState([])
+  const [showDebug, setShowDebug] = useState(false)
+  const [isChat, setIsChat] = useState(false)
+  const [debugHiddenByUser, setDebugHiddenByUser] = useState(false)
   const [pets, setPets] = useState([])
   const [messageMap, setMessageMap] = useState({})
   const [wsStatus, setWsStatus] = useState({ enabled: true, port: 8765 })
@@ -82,6 +87,118 @@ function App() {
   const [bubble, setBubble] = useState(null)
   const [userPetDir, setUserPetDir] = useState('')
   const [locale, setLocale] = useState('en')
+  const [apiKey, setApiKey] = useState('')
+  const [showApiKey, setShowApiKey] = useState(false)
+  const [chatMessages, setChatMessages] = useState([])
+  const [chatInput, setChatInput] = useState('')
+  const [chatLoading, setChatLoading] = useState(false)
+  const [chatHistory, setChatHistory] = useState([])
+  const [activeChatId, setActiveChatId] = useState(null)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [inputPulse, setInputPulse] = useState(false)
+  const [windowFocused, setWindowFocused] = useState(true)
+  const [chatError, setChatError] = useState('')
+  const chatMessagesRef = useRef(null)
+  const pointerDownRef = useRef(null)
+  const canvasRef = useRef(null)
+
+  
+  // Particle background animation for chat window
+  useEffect(() => {
+    if (!isChat || !canvasRef.current) return
+
+    const canvas = canvasRef.current
+    const ctx = canvas.getContext('2d')
+    let animationId = null
+    let particles = []
+
+    const resize = () => {
+      canvas.width = canvas.offsetWidth
+      canvas.height = canvas.offsetHeight
+    }
+    resize()
+    window.addEventListener('resize', resize)
+
+    // Create particles
+    const particleCount = 60
+    for (let i = 0; i < particleCount; i++) {
+      particles.push({
+        x: Math.random() * canvas.width,
+        y: Math.random() * canvas.height,
+        size: Math.random() * 3 + 1,
+        speedY: -(Math.random() * 0.3 + 0.1),
+        speedX: (Math.random() - 0.5) * 0.2,
+        opacity: Math.random() * 0.4 + 0.1,
+        fadeSpeed: Math.random() * 0.005 + 0.002,
+      })
+    }
+
+    const animate = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+
+      particles.forEach((p) => {
+        p.y += p.speedY
+        p.x += p.speedX
+        p.opacity += Math.sin(Date.now() * p.fadeSpeed) * 0.01
+
+        if (p.y < -10) {
+          p.y = canvas.height + 10
+          p.x = Math.random() * canvas.width
+        }
+        if (p.x < -10) p.x = canvas.width + 10
+        if (p.x > canvas.width + 10) p.x = -10
+
+        p.opacity = Math.max(0.05, Math.min(0.5, p.opacity))
+
+        ctx.beginPath()
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2)
+        ctx.fillStyle = `rgba(123, 97, 255, ${p.opacity})`
+        ctx.fill()
+      })
+
+      animationId = requestAnimationFrame(animate)
+    }
+    animate()
+
+    return () => {
+      cancelAnimationFrame(animationId)
+      window.removeEventListener('resize', resize)
+    }
+  }, [isChat])
+
+  // Load conversations from SQLite when chat window initializes
+  useEffect(() => {
+    if (!isChat) return
+    const loadConversations = async () => {
+      try {
+        const convs = await invoke('get_conversations')
+        setChatHistory(convs.map(c => ({ id: c.id, title: c.title, preview: c.title })))
+      } catch (e) {
+        console.error('Failed to load conversations:', e)
+      }
+    }
+    loadConversations()
+  }, [isChat])
+
+  // Search conversations with debounce
+  useEffect(() => {
+    if (!isChat) return
+    const timer = setTimeout(async () => {
+      try {
+        let convs
+        if (searchQuery.trim()) {
+          convs = await invoke('search_conversations', { keyword: searchQuery })
+        } else {
+          convs = await invoke('get_conversations')
+        }
+        setChatHistory(convs.map(c => ({ id: c.id, title: c.title, preview: c.title })))
+      } catch (e) {
+        console.error('Failed to search conversations:', e)
+      }
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [searchQuery, isChat])
 
   const t = (key, params) => translate(locale, key, params)
   
@@ -91,6 +208,7 @@ function App() {
   const frameRef = useRef(0)
   const stateRef = useRef('idle')
   const stateStartRef = useRef(Date.now())
+  const lastClickRef = useRef(0)
   const displayWidth = CELL_WIDTH * petScale
   const displayHeight = CELL_HEIGHT * petScale
   const windowWidth = Math.max(displayWidth, MIN_WINDOW_WIDTH)
@@ -98,28 +216,109 @@ function App() {
 
   // Determine if this is the settings window
   useEffect(() => {
+    const onKeyDown = (e) => {
+      try {
+        if (e.key === 'd') {
+          setDebugHiddenByUser((prev) => !prev)
+        }
+      } catch (_) {}
+    }
+    window.addEventListener('keydown', onKeyDown)
+
     const init = async () => {
-      const window = getCurrentWebviewWindow()
-      const label = await window.label
-      setIsSettings(label === 'settings')
-      
-      if (label === 'pet') {
-        loadLanguage()
-        loadPetScale()
-        loadPetList()
-        loadInitialPet()
-      } else {
-        loadPetScale()
-        loadPetList()
-        loadMessageMap()
-        loadWsStatus()
-        loadLiveSourcesStatus()
-        loadLiveSourcePrefixEnabled()
-        loadUserPetDir()
-        loadLanguage()
+      try {
+        const webview = getCurrentWebviewWindow()
+        const currentWindow = getCurrentWindow()
+        const webviewLabel = webview?.label || 'unknown-webview'
+        const windowLabel = currentWindow?.label || 'unknown-window'
+
+        let label = windowLabel
+        try {
+          const meta = typeof window !== 'undefined' ? window.__TAURI_INTERNALS__?.metadata : null
+          if (meta?.currentWindow?.label) {
+            label = meta.currentWindow.label
+          } else if (meta?.currentWebview?.label) {
+            label = meta.currentWebview.label
+          }
+        } catch (_) {
+          // ignore metadata probe failure
+        }
+        if (!label || label === 'unknown-window') {
+          label = webviewLabel
+        }
+
+        const isChatWindow = label === 'chat'
+        const isSettingsWindow = label === 'settings'
+
+        const identity = isChatWindow ? 'chat' : isSettingsWindow ? 'settings' : label === 'pet' ? 'pet' : 'unknown'
+        setWindowIdentity(identity)
+        setIsSettings(isSettingsWindow)
+        setIsChat(isChatWindow)
+
+        console.debug('[DEBUG PROBE 21] init identity', {
+          webviewLabel,
+          windowLabel,
+          resolvedLabel: label,
+          identity,
+          isSettingsWindow,
+          isChatWindow,
+        })
+        console.warn('[DEBUG PROBE 21] init identity', {
+          webviewLabel,
+          windowLabel,
+          resolvedLabel: label,
+          identity,
+          isSettingsWindow,
+          isChatWindow,
+        })
+
+        if (isChatWindow) {
+          loadLanguage()
+        } else if (identity === 'pet') {
+          await loadLanguage()
+          await loadPetScale()
+          await loadPetList()
+          await loadInitialPet()
+        } else if (isSettingsWindow) {
+          loadPetScale()
+          loadPetList()
+          loadMessageMap()
+          loadWsStatus()
+          loadLiveSourcesStatus()
+          loadLiveSourcePrefixEnabled()
+          loadUserPetDir()
+          loadLanguage()
+          loadApiKey()
+          currentWindow.onCloseRequested(async (e) => {
+            try {
+              e.preventDefault()
+              await currentWindow.hide()
+            } catch (err) {
+              console.error('Failed to hide settings window:', err)
+            }
+          })
+        } else {
+          await loadLanguage()
+          await loadPetScale()
+          await loadPetList()
+          await loadInitialPet()
+        }
+      } catch (err) {
+        console.error('[DEBUG PROBE 22] init failed', err)
+        setWindowIdentity('unknown')
+        setIsSettings(false)
+        setIsChat(false)
+        await loadLanguage()
+        await loadPetScale()
+        await loadPetList()
+        await loadInitialPet()
       }
     }
     init()
+
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+    }
   }, [])
 
   // Listen for state changes from backend
@@ -139,6 +338,20 @@ function App() {
       const source = getSpritesheetSource(config)
       if (source) {
         setSpritesheet(source)
+      }
+    })
+
+    const unlistenReloadPet = listen('reload-pet', async () => {
+      try {
+        console.debug('[DEBUG PROBE 25] reload-pet start')
+        setDebugLogs((prev) => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] reload-pet start`])
+        await loadPetList()
+        await loadInitialPet()
+        console.debug('[DEBUG PROBE 26] reload-pet finished')
+        setDebugLogs((prev) => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] reload-pet finished`])
+      } catch (e) {
+        console.error('Failed to reload pet:', e)
+        setDebugLogs((prev) => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] reload-pet error: ${String(e)}`])
       }
     })
 
@@ -169,11 +382,14 @@ function App() {
       unlistenPetLoaded.then(f => f())
       unlistenScaleChanged.then(f => f())
       unlistenCodexBubble.then(f => f())
+      unlistenReloadPet.then(f => f())
       if (bubbleTimerRef.current) {
         clearTimeout(bubbleTimerRef.current)
       }
     }
   }, [])
+
+
 
   // Animation loop
   useEffect(() => {
@@ -283,6 +499,20 @@ function App() {
 
   const loadInitialPet = async () => {
     try {
+    // Small delay to ensure backend is ready
+    await new Promise(r => setTimeout(r, 500))
+      const savedId = await invoke('get_selected_pet')
+      if (savedId) {
+        try {
+          const pet = await invoke('load_pet', { petId: savedId })
+          setSpritesheet(getSpritesheetSource(pet))
+          return
+        } catch (e) {
+          console.warn('Saved pet not found, falling back:', e)
+        }
+      }
+
+
       const list = await invoke('get_pet_list')
       const validPet =
         list.find(p => p.id === 'claude' && p.has_spritesheet) ||
@@ -346,6 +576,7 @@ function App() {
       if (source) {
         setSpritesheet(source)
       }
+      try { await invoke('save_selected_pet', { petId }) } catch (e) { console.error('Failed to save selected pet:', e) }
       // Backend emits 'pet-loaded' event to the pet window after loading
       loadPetList() // Refresh list to show active
     } catch (e) {
@@ -461,6 +692,103 @@ function App() {
     }
   }
 
+  const loadApiKey = async () => {
+    try {
+      const key = await invoke('get_mimo_api_key')
+      setApiKey(key || '')
+    } catch (e) {
+      console.error('Failed to load API key:', e)
+    }
+  }
+
+  const handleSaveApiKey = async () => {
+    try {
+      await invoke('save_mimo_api_key', { apiKey })
+    } catch (e) {
+      console.error('Failed to save API key:', e)
+    }
+  }
+
+  const handleTestConnection = async () => {
+    try {
+      await invoke('test_mimo_connection')
+      alert('Connection OK')
+    } catch (e) {
+      console.error('Connection test failed:', e)
+      alert('Connection failed')
+    }
+  }
+
+  const handleSendChat = async () => {
+    const text = chatInput.trim()
+    if (!text || chatLoading) return
+
+    let convId = activeChatId
+
+    // Create conversation if none exists
+    if (!convId) {
+      try {
+        const title = text.substring(0, 20)
+        convId = await invoke('create_conversation', { title })
+        setActiveChatId(convId)
+      } catch (e) {
+        console.error('Failed to create conversation:', e)
+        return
+      }
+    }
+
+    const userMsg = { role: 'user', content: text }
+    const nextMessages = [...chatMessages, userMsg]
+    setChatMessages(nextMessages)
+    setChatInput('')
+    setChatLoading(true)
+    setChatError('')
+
+    try {
+      // Save user message to SQLite
+      await invoke('save_message', { conversationId: convId, role: 'user', content: text })
+
+      const response = await invoke('chat_completion', { messages: nextMessages })
+      setChatMessages([...nextMessages, { role: 'assistant', content: response }])
+
+      // Save AI response to SQLite
+      await invoke('save_message', { conversationId: convId, role: 'assistant', content: response })
+
+      // Refresh conversation list
+      const convs = await invoke('get_conversations')
+      setChatHistory(convs.map(c => ({ id: c.id, title: c.title, preview: c.title })))
+    } catch (e) {
+      setChatError(String(e))
+      setChatMessages(nextMessages)
+    } finally {
+      setChatLoading(false)
+    }
+  }
+
+  const handleChatKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      handleSendChat()
+    }
+  }
+
+  const copyDebugLogs = async () => {
+    try {
+      const logs = (window.__DEBUG_LOGS__ || []).slice(-200)
+      const text = logs.map((l) => `[${new Date(l.t).toLocaleTimeString()}] ${l.level}: ${l.m}`).join('\n')
+      await navigator.clipboard.writeText(text || 'No logs')
+      alert('Logs copied')
+    } catch (e) {
+      console.error('Failed to copy logs:', e)
+    }
+  }
+
+  useEffect(() => {
+    if (chatMessagesRef.current) {
+      chatMessagesRef.current.scrollTop = chatMessagesRef.current.scrollHeight
+    }
+  }, [chatMessages])
+
   const loadLanguage = async () => {
     try {
       const lang = await invoke('get_language')
@@ -482,11 +810,69 @@ function App() {
 
   const handlePetMouseDown = async (event) => {
     if (event.button !== 0) return
+    pointerDownRef.current = { x: event.clientX, y: event.clientY, moved: false }
+    const onMove = (e) => {
+      const p = pointerDownRef.current
+      if (!p) return
+      if (Math.abs(e.clientX - p.x) > 5 || Math.abs(e.clientY - p.y) > 5) {
+        p.moved = true
+        window.removeEventListener('pointermove', onMove)
+        getCurrentWindow().startDragging().catch((err) => {
+          console.error('Failed to start window drag:', err)
+        })
+      }
+    }
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      pointerDownRef.current = null
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
+
+  const handleOpenChat = async () => {
+    setDebugLogs((prev) => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] open-chat start`])
+    try {
+      await invoke('show_chat_window')
+      setDebugLogs((prev) => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] open-chat invoke ok`])
+      return
+    } catch (invokeErr) {
+      console.warn('[DEBUG PROBE 23] show_chat_window invoke failed', invokeErr)
+      setDebugLogs((prev) => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] open-chat invoke failed, try fallback`])
+    }
 
     try {
-      await getCurrentWindow().startDragging()
+      const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow')
+      const existing = WebviewWindow.getByLabel('chat')
+      if (existing) {
+        await existing.show()
+        await existing.setFocus()
+        setDebugLogs((prev) => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] open-chat existing window focused`])
+        return
+      }
+
+      new WebviewWindow('chat', {
+        url: 'index.html',
+        title: locale === 'zh-CN' ? '和宠物对话' : 'Chat with Pet',
+        width: 420,
+        height: 560,
+        center: true,
+        visible: true,
+      })
+      setDebugLogs((prev) => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] open-chat created window`])
+    } catch (fallbackErr) {
+      console.error('[DEBUG PROBE 24] open-chat fallback failed', fallbackErr)
+      setDebugLogs((prev) => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] open-chat fallback failed`])
+    }
+  }
+
+  const handlePetDoubleClick = async () => {
+    try {
+      try { window.__DEBUG_LOGS__ = window.__DEBUG_LOGS__ || []; window.__DEBUG_LOGS__.push({t: Date.now(), m:'dblclick'}) } catch(_){}
+      await handleOpenChat()
     } catch (e) {
-      console.error('Failed to start window drag:', e)
+      console.error('Failed to open chat on double click:', e)
     }
   }
 
@@ -501,16 +887,50 @@ function App() {
     }
   }
 
+  const handlePetPointerUp = async (event) => {
+    const p = pointerDownRef.current
+    pointerDownRef.current = null
+    if (event.button !== 0) return
+    if (!p || p.moved) return
+
+    const now = Date.now()
+    if (now - lastClickRef.current < 300) {
+      lastClickRef.current = 0
+      await handleOpenChat()
+    } else {
+      lastClickRef.current = now
+      await handleTrigger('jumping')
+    }
+  }
+
   // Pet window
-  if (!isSettings) {
+  if (windowIdentity !== 'settings' && !isSettings && windowIdentity !== 'chat' && !isChat) {
     return (
-      <div 
+      <div
         className="pet-container"
-        data-tauri-drag-region
         style={{ width: windowWidth, height: windowHeight, '--pet-display-height': `${displayHeight}px` }}
-        onMouseDown={handlePetMouseDown}
-        onClick={() => handleTrigger('jumping')}
+        onPointerDown={handlePetMouseDown}
+        onPointerUp={handlePetPointerUp}
       >
+        {showDebug && (
+          <div style={{ position: 'fixed', top: 8, left: 8, zIndex: 9999, background: 'rgba(0,0,0,0.88)', color: '#0f0', padding: 8, borderRadius: 6, fontSize: 11, lineHeight: '14px', maxWidth: 320, pointerEvents: 'auto' }}>
+            <div><b>Pet Debug</b></div>
+            <div>windowIdentity: {windowIdentity}</div>
+            <div>isSettings: {String(isSettings)}</div>
+            <div>isChat: {String(isChat)}</div>
+            <div>lastEvents:</div>
+            <div style={{ maxHeight: 80, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{debugLogs.slice(-8).join('\n')}</div>
+            <div style={{ marginTop: 6, display: 'flex', gap: 6 }}>
+              <button className="button button-ghost" onClick={() => setDebugHiddenByUser(true)}>Hide</button>
+              <button className="button button-ghost" onClick={() => {
+                try {
+                  const text = (window.__DEBUG_LOGS__ || []).slice(-100).map(x => `${new Date(x.t).toLocaleTimeString()} [${x.level}] ${x.m}`).join('\n')
+                  navigator.clipboard.writeText(text)
+                } catch (_) {}
+              }}>CopyLogs</button>
+            </div>
+          </div>
+        )}
         {bubble?.text && (
           <div
             className={`pet-bubble ${bubble.source ? 'clickable' : ''}`}
@@ -524,6 +944,7 @@ function App() {
         {spritesheet ? (
           <div
             className="pet-sprite"
+            onDoubleClick={handlePetDoubleClick}
             style={{
               backgroundImage: `url(${spritesheet})`,
               backgroundPosition: getBackgroundPosition(),
@@ -549,15 +970,186 @@ function App() {
     )
   }
 
+
+  // Chat window
+  if (windowIdentity === 'chat' || isChat) {
+    const filteredHistory = searchQuery
+      ? chatHistory.filter(h => h.title.toLowerCase().includes(searchQuery.toLowerCase()) || h.preview.toLowerCase().includes(searchQuery.toLowerCase()))
+      : chatHistory
+
+    const handleNewChat = async () => {
+      try {
+        const newId = await invoke('create_conversation', { title: '新对话' })
+        setActiveChatId(newId)
+        setChatMessages([])
+        setChatInput('')
+        setChatError('')
+        const convs = await invoke('get_conversations')
+        setChatHistory(convs.map(c => ({ id: c.id, title: c.title, preview: c.title })))
+      } catch (e) {
+        console.error('Failed to create conversation:', e)
+      }
+    }
+
+    const handleDeleteChat = async (id) => {
+      try {
+        await invoke('delete_conversation', { id })
+        if (activeChatId === id) {
+          setActiveChatId(null)
+          setChatMessages([])
+        }
+        const convs = await invoke('get_conversations')
+        setChatHistory(convs.map(c => ({ id: c.id, title: c.title, preview: c.title })))
+      } catch (e) {
+        console.error('Failed to delete conversation:', e)
+      }
+    }
+
+    const handleSelectChat = async (id) => {
+      try {
+        setActiveChatId(id)
+        const msgs = await invoke('get_messages', { conversationId: id })
+        setChatMessages(msgs.map(m => ({ role: m.role, content: m.content })))
+      } catch (e) {
+        console.error('Failed to load messages:', e)
+      }
+    }
+
+    return (
+      <div className="chat-root">
+        {/* Sidebar */}
+        <div className={`chat-sidebar ${sidebarOpen ? "" : "collapsed"}`}>
+          <div className="chat-sidebar-header">
+            <button className="chat-sidebar-close" onClick={() => setSidebarOpen(false)}>✕</button>
+            <button className="chat-new-chat-btn" onClick={handleNewChat}>＋ 新对话</button>
+          </div>
+          <div className="chat-history-list">
+            {filteredHistory.map((h) => (
+              <div
+                key={h.id}
+                className={`chat-history-item ${h.id === activeChatId ? "active" : ""}`}
+                onClick={() => handleSelectChat(h.id)}
+              >
+                <div className="chat-history-title">{h.title}</div>
+                <div className="chat-history-preview">{h.preview}</div>
+                <button className="chat-history-delete" onClick={(e) => { e.stopPropagation(); handleDeleteChat(h.id) }}>✕</button>
+              </div>
+            ))}
+            {filteredHistory.length === 0 && (
+              <div style={{ padding: '20px 12px', textAlign: 'center', color: 'rgba(255,255,255,0.3)', fontSize: 12 }}>暂无对话</div>
+            )}
+          </div>
+          <div className="chat-sidebar-search">
+            <input
+              className="chat-search-input"
+              placeholder="搜索对话..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+          </div>
+        </div>
+
+        {/* Main area */}
+        <div className="chat-main">
+          <header className="chat-header">
+            <div className="chat-header-left">
+              <div className="chat-traffic-lights">
+                <button className="chat-traffic-light chat-traffic-light-close" onClick={() => getCurrentWindow().hide()}><span className="chat-traffic-light-icon">✕</span></button>
+                <button className="chat-traffic-light chat-traffic-light-minimize"><span className="chat-traffic-light-icon">−</span></button>
+                <button className="chat-traffic-light chat-traffic-light-maximize"><span className="chat-traffic-light-icon">◇</span></button>
+              </div>
+              <button className="chat-sidebar-toggle" onClick={() => setSidebarOpen(!sidebarOpen)}>☰</button>
+              <div className="chat-avatar">🤖</div>
+              <span className="chat-title">{t('chatTitle')}</span>
+            </div>
+            <div className="chat-header-right">
+              <div className="chat-lang-toggle">
+                <button className={`chat-lang-btn ${locale === "zh-CN" ? "active" : ""}`} onClick={() => locale !== "zh-CN" && handleToggleLanguage()}>中文</button>
+                <button className={`chat-lang-btn ${locale === "en" ? "active" : ""}`} onClick={() => locale !== "en" && handleToggleLanguage()}>EN</button>
+              </div>
+            </div>
+          </header>
+
+          <div ref={chatMessagesRef} className="chat-messages">
+            {chatMessages.length === 0 && (
+              <div className="chat-empty">
+                <div className="chat-empty-icon">💬</div>
+                <div className="chat-empty-text">{t('chatInputPlaceholder')}</div>
+              </div>
+            )}
+            {chatMessages.map((m, idx) => (
+              <div key={idx} className={`chat-msg chat-msg-${m.role}`} style={{ animationDelay: `${idx * 0.06}s` }}>
+                <div className={`chat-msg-avatar chat-msg-avatar-${m.role}`}>
+                  {m.role === 'user' ? '👤' : '🤖'}
+                </div>
+                <div className="chat-msg-bubble">{m.content}</div>
+              </div>
+            ))}
+          </div>
+
+          {chatLoading && (
+            <div className="chat-typing">
+              <div className="chat-typing-dots">
+                <div className="chat-typing-dot"></div>
+                <div className="chat-typing-dot"></div>
+                <div className="chat-typing-dot"></div>
+              </div>
+              <span className="chat-typing-text">思考中...</span>
+            </div>
+          )}
+          {chatError && <div className="chat-error">{chatError}</div>}
+
+          <div className="chat-input-area">
+            <div className={`chat-input-wrapper ${inputPulse ? "chat-input-pulse" : ""}`}>
+              <textarea
+                className="chat-input"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={handleChatKeyDown}
+                placeholder={t('chatInputPlaceholder')}
+                rows={1}
+              />
+            </div>
+            <button className="chat-send-btn" onClick={() => { setInputPulse(true); setTimeout(() => setInputPulse(false), 600); handleSendChat(); }} disabled={chatLoading || !chatInput.trim()}>
+              {chatLoading ? '⏳' : '➤'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   // Settings window
   return (
-    <div className="settings-container">
+    <div className="settings-container" style={{ position: 'relative', minHeight: '100vh', background: '#f6f7f9' }}>
+      {showDebug && (
+        <div style={{ position: 'fixed', top: 8, left: 8, zIndex: 9999, background: 'rgba(0,0,0,0.78)', color: '#0f0', padding: 8, borderRadius: 6, fontSize: 11, lineHeight: '14px', maxWidth: 320 }}>
+          <div><b>Pet Debug</b></div>
+          <div>windowIdentity: {windowIdentity}</div>
+          <div>isSettings: {String(isSettings)}</div>
+          <div>isChat: {String(isChat)}</div>
+          <div>lastEvents:</div>
+          <div style={{ maxHeight: 80, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{debugLogs.slice(-8).join('\n')}</div>
+          <div style={{ marginTop: 6, display: 'flex', gap: 6 }}>
+            <button className="button button-ghost" onClick={() => setShowDebug(false)}>Hide</button>
+            <button className="button button-ghost" onClick={() => {
+              try {
+                const text = (window.__DEBUG_LOGS__ || []).slice(-100).map(x => `${new Date(x.t).toLocaleTimeString()} [${x.level}] ${x.m}`).join('\n')
+                navigator.clipboard.writeText(text)
+              } catch (_) {}
+            }}>CopyLogs</button>
+          </div>
+        </div>
+      )}
       <div className="settings-shell">
         <header className="settings-header">
           <div className="settings-title-row">
             <h1>{t('title')}</h1>
             <button className="button button-ghost language-toggle" onClick={handleToggleLanguage}>
               {locale === 'en' ? '中文' : 'EN'}
+            </button>
+            <button className="button button-ghost" onClick={copyDebugLogs} style={{ marginLeft: 8 }}>
+              {t('copyLogs')}
             </button>
           </div>
         </header>
@@ -691,6 +1283,38 @@ function App() {
                   </div>
                 )
               })}
+            </div>
+          </section>
+
+          <section className="settings-section ai-chat-section">
+            <div className="section-heading">
+              <h2>{t('aiChat')}</h2>
+            </div>
+            <div className="field-stack">
+              <label className="field-label">{t('apiKey')}</label>
+              <div className="api-key-row">
+                <input
+                  type={showApiKey ? 'text' : 'password'}
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  placeholder={t('apiKeyHint')}
+                  className="api-key-input"
+                />
+                <button className="button button-ghost" onClick={() => setShowApiKey((v) => !v)}>
+                  {showApiKey ? t('hide') : t('show')}
+                </button>
+                <button className="button button-primary" onClick={handleSaveApiKey}>
+                  {t('save')}
+                </button>
+              </div>
+            </div>
+            <div className="chat-actions-row">
+              <button className="button button-primary" onClick={handleTestConnection}>
+                {t('testConnection')}
+              </button>
+              <button className="button button-primary" onClick={handleOpenChat}>
+                {t('chatWithPet')}
+              </button>
             </div>
           </section>
 

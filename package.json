@@ -17,6 +17,7 @@
     "dev": "vite --host 127.0.0.1 --port 1420",
     "build": "vite build",
     "build:windows": "tauri build --bundles nsis",
+    "shortcut": "powershell -ExecutionPolicy Bypass -File scripts/create-shortcut.ps1",
     "preview": "vite preview",
     "tauri": "tauri"
   },

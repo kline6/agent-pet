@@ -3,7 +3,7 @@
 
 use crate::message::default_message_map;
 use crate::pet::{load_pet_config, PetConfig, PetState};
-use crate::settings::{load_settings, save_settings, AppSettings};
+use crate::settings::{load_settings, save_settings, AppSettings, PetPosition};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tauri::{Emitter, LogicalSize, Manager};
@@ -26,14 +26,19 @@ pub struct PetStateMachine {
     websocket_port: u16,
     codex_monitor_enabled: bool,
     claude_monitor_enabled: bool,
-    opencode_monitor_enabled: bool,
-    openclaw_monitor_enabled: bool,
-    hermes_monitor_enabled: bool,
     live_source_paths: HashMap<String, String>,
     live_source_focus_targets: HashMap<String, String>,
     live_source_prefix_enabled: bool,
     pet_scale: f64,
     language: String,
+    saved_pet_position: Option<PetPosition>,
+    auto_start_enabled: bool,
+    always_on_top_enabled: bool,
+    mimo_api_key_val: String,
+    mimo_base_url_val: String,
+    mimo_model_val: String,
+    pet_system_prompt_val: String,
+    selected_pet_val: Option<String>,
 }
 
 impl PetStateMachine {
@@ -49,14 +54,19 @@ impl PetStateMachine {
             websocket_port: 8765,
             codex_monitor_enabled: live_source_enabled_from_settings(&settings, "codex"),
             claude_monitor_enabled: live_source_enabled_from_settings(&settings, "claude"),
-            opencode_monitor_enabled: live_source_enabled_from_settings(&settings, "opencode"),
-            openclaw_monitor_enabled: live_source_enabled_from_settings(&settings, "openclaw"),
-            hermes_monitor_enabled: live_source_enabled_from_settings(&settings, "hermes"),
             live_source_paths: live_source_paths_from_settings(&settings),
             live_source_focus_targets: live_source_focus_targets_from_settings(&settings),
             live_source_prefix_enabled: settings.live_source_prefix_enabled,
             pet_scale: DEFAULT_PET_SCALE,
             language: normalize_language(&settings.language).to_string(),
+            saved_pet_position: settings.pet_position,
+            auto_start_enabled: settings.auto_start,
+            always_on_top_enabled: settings.always_on_top,
+            mimo_api_key_val: settings.mimo_api_key,
+            mimo_base_url_val: settings.mimo_base_url,
+            mimo_model_val: settings.mimo_model,
+            pet_system_prompt_val: settings.pet_system_prompt,
+            selected_pet_val: settings.selected_pet,
         }
     }
 
@@ -96,25 +106,10 @@ impl PetStateMachine {
         self.claude_monitor_enabled
     }
 
-    pub fn opencode_monitor_enabled(&self) -> bool {
-        self.opencode_monitor_enabled
-    }
-
-    pub fn openclaw_monitor_enabled(&self) -> bool {
-        self.openclaw_monitor_enabled
-    }
-
-    pub fn hermes_monitor_enabled(&self) -> bool {
-        self.hermes_monitor_enabled
-    }
-
     pub fn live_source_enabled(&self, source: &str) -> bool {
         match source {
             "codex" => self.codex_monitor_enabled,
             "claude" => self.claude_monitor_enabled,
-            "opencode" => self.opencode_monitor_enabled,
-            "openclaw" => self.openclaw_monitor_enabled,
-            "hermes" => self.hermes_monitor_enabled,
             _ => false,
         }
     }
@@ -127,18 +122,6 @@ impl PetStateMachine {
             }
             "claude" => {
                 self.claude_monitor_enabled = enabled;
-                true
-            }
-            "opencode" => {
-                self.opencode_monitor_enabled = enabled;
-                true
-            }
-            "openclaw" => {
-                self.openclaw_monitor_enabled = enabled;
-                true
-            }
-            "hermes" => {
-                self.hermes_monitor_enabled = enabled;
                 true
             }
             _ => false,
@@ -323,6 +306,71 @@ impl PetStateMachine {
         self.persist_settings()
     }
 
+    pub fn pet_position(&self) -> Option<&PetPosition> {
+        self.saved_pet_position.as_ref()
+    }
+
+    pub fn set_pet_position(&mut self, x: i32, y: i32) -> Result<(), String> {
+        self.saved_pet_position = Some(PetPosition { x, y });
+        self.persist_settings()
+    }
+
+    pub fn auto_start(&self) -> bool {
+        self.auto_start_enabled
+    }
+
+    pub fn set_auto_start(&mut self, enabled: bool) -> Result<(), String> {
+        self.auto_start_enabled = enabled;
+        self.persist_settings()
+    }
+
+    pub fn always_on_top(&self) -> bool {
+        self.always_on_top_enabled
+    }
+
+    pub fn set_always_on_top(&mut self, enabled: bool) -> Result<(), String> {
+        self.always_on_top_enabled = enabled;
+        if let Some(window) = self.app_handle.get_webview_window("pet") {
+            let _ = window.set_always_on_top(enabled);
+        }
+        self.persist_settings()
+    }
+
+    pub fn mimo_api_key(&self) -> &str {
+        &self.mimo_api_key_val
+    }
+
+    pub fn set_mimo_api_key(&mut self, key: String) -> Result<(), String> {
+        self.mimo_api_key_val = key;
+        self.persist_settings()
+    }
+
+    pub fn mimo_base_url(&self) -> &str {
+        &self.mimo_base_url_val
+    }
+
+    pub fn mimo_model(&self) -> &str {
+        &self.mimo_model_val
+    }
+
+    pub fn pet_system_prompt(&self) -> &str {
+        &self.pet_system_prompt_val
+    }
+
+    pub fn set_pet_system_prompt(&mut self, prompt: String) -> Result<(), String> {
+        self.pet_system_prompt_val = prompt;
+        self.persist_settings()
+    }
+
+    pub fn selected_pet(&self) -> Option<String> {
+        self.selected_pet_val.clone()
+    }
+
+    pub fn set_selected_pet(&mut self, pet_id: Option<String>) -> Result<(), String> {
+        self.selected_pet_val = pet_id;
+        self.persist_settings()
+    }
+
     fn current_settings(&self) -> AppSettings {
         AppSettings {
             live_source_paths: self.live_source_paths.clone(),
@@ -330,12 +378,17 @@ impl PetStateMachine {
             live_source_enabled: HashMap::from([
                 ("codex".to_string(), self.codex_monitor_enabled),
                 ("claude".to_string(), self.claude_monitor_enabled),
-                ("opencode".to_string(), self.opencode_monitor_enabled),
-                ("openclaw".to_string(), self.openclaw_monitor_enabled),
-                ("hermes".to_string(), self.hermes_monitor_enabled),
             ]),
             live_source_prefix_enabled: self.live_source_prefix_enabled,
             language: self.language.clone(),
+            pet_position: self.saved_pet_position.clone(),
+            auto_start: self.auto_start_enabled,
+            always_on_top: self.always_on_top_enabled,
+            mimo_api_key: self.mimo_api_key_val.clone(),
+            mimo_base_url: self.mimo_base_url_val.clone(),
+            mimo_model: self.mimo_model_val.clone(),
+            pet_system_prompt: self.pet_system_prompt_val.clone(),
+            selected_pet: self.selected_pet_val.clone(),
         }
     }
 
@@ -355,9 +408,6 @@ pub fn default_live_source_paths() -> HashMap<String, String> {
     HashMap::from([
         ("codex".to_string(), home_path([".codex", "sessions"])),
         ("claude".to_string(), home_path([".claude", "projects"])),
-        ("opencode".to_string(), default_opencode_path()),
-        ("openclaw".to_string(), home_path([".openclaw", "agents"])),
-        ("hermes".to_string(), home_path([".hermes", "sessions"])),
     ])
 }
 
@@ -365,25 +415,8 @@ pub fn default_live_source_focus_targets() -> HashMap<String, String> {
     HashMap::from([
         ("codex".to_string(), "app:Codex".to_string()),
         ("claude".to_string(), "app:Claude".to_string()),
-        ("opencode".to_string(), "app:Terminal".to_string()),
-        (
-            "openclaw".to_string(),
-            "url:http://127.0.0.1:18789/".to_string(),
-        ),
-        ("hermes".to_string(), "app:Terminal".to_string()),
+
     ])
-}
-
-fn default_opencode_path() -> String {
-    #[cfg(windows)]
-    {
-        return platform_data_path(["opencode", "opencode.db"]);
-    }
-
-    #[cfg(not(windows))]
-    {
-        home_path([".local", "share", "opencode", "opencode.db"])
-    }
 }
 
 fn home_path<const N: usize>(parts: [&str; N]) -> String {
@@ -391,9 +424,6 @@ fn home_path<const N: usize>(parts: [&str; N]) -> String {
 }
 
 #[cfg(windows)]
-fn platform_data_path<const N: usize>(parts: [&str; N]) -> String {
-    path_from_base(dirs::data_local_dir().or_else(dirs::home_dir), parts)
-}
 
 fn path_from_base<const N: usize>(base: Option<PathBuf>, parts: [&str; N]) -> String {
     let Some(mut path) = base else {
@@ -410,7 +440,7 @@ fn path_from_base<const N: usize>(base: Option<PathBuf>, parts: [&str; N]) -> St
 fn live_source_paths_from_settings(settings: &AppSettings) -> HashMap<String, String> {
     let mut paths = default_live_source_paths();
 
-    for source in ["codex", "claude", "opencode", "openclaw", "hermes"] {
+    for source in ["codex", "claude"] {
         if let Some(path) = settings.live_source_paths.get(source) {
             let path = path.trim();
             if !path.is_empty() {
@@ -425,7 +455,7 @@ fn live_source_paths_from_settings(settings: &AppSettings) -> HashMap<String, St
 fn live_source_focus_targets_from_settings(settings: &AppSettings) -> HashMap<String, String> {
     let mut targets = default_live_source_focus_targets();
 
-    for source in ["codex", "claude", "opencode", "openclaw", "hermes"] {
+    for source in ["codex", "claude"] {
         if let Some(target) = settings.live_source_focus_targets.get(source) {
             let target = target.trim();
             if !target.is_empty() && validate_focus_target(target).is_ok() {
@@ -446,10 +476,7 @@ fn live_source_enabled_from_settings(settings: &AppSettings, source: &str) -> bo
 }
 
 fn is_known_live_source(source: &str) -> bool {
-    matches!(
-        source,
-        "codex" | "claude" | "opencode" | "openclaw" | "hermes"
-    )
+    matches!(source, "codex" | "claude")
 }
 
 fn validate_focus_target(target: &str) -> Result<(), String> {
@@ -474,9 +501,6 @@ fn source_label(source: &str) -> &str {
     match source {
         "codex" => "Codex",
         "claude" => "Claude Code",
-        "opencode" => "opencode",
-        "openclaw" => "OpenClaw",
-        "hermes" => "Hermes Agent",
         _ => source,
     }
 }
@@ -496,7 +520,7 @@ mod focus_target_tests {
     #[test]
     fn default_focus_targets_cover_known_sources() {
         let targets = default_live_source_focus_targets();
-        for source in ["codex", "claude", "opencode", "openclaw", "hermes"] {
+        for source in ["codex", "claude"] {
             assert!(targets.contains_key(source), "missing target for {source}");
             assert!(validate_focus_target(targets.get(source).unwrap()).is_ok());
         }
@@ -543,7 +567,7 @@ mod focus_target_tests {
     fn live_source_enabled_defaults_to_only_codex() {
         let settings = AppSettings::default();
         assert!(live_source_enabled_from_settings(&settings, "codex"));
-        for source in ["claude", "opencode", "openclaw", "hermes"] {
+        for source in ["claude"] {
             assert!(!live_source_enabled_from_settings(&settings, source));
         }
     }
