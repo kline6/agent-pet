@@ -68,6 +68,7 @@
     }
   },
   "bundle": {
+    "resources": ["../pets/*/*"],
     "active": true,
     "targets": ["app"],
     "icon": [

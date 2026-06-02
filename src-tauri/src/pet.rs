@@ -4,6 +4,7 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tauri::Manager;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
@@ -205,6 +206,21 @@ pub fn builtin_pets_dir() -> PathBuf {
         .join("pets")
 }
 
+/// Resolve built-in pets directory using the Tauri AppHandle.
+/// In packaged builds this returns <resource_dir>/pets/, in dev builds it
+/// falls back to the source-tree pets/ directory.
+pub fn builtin_pets_dir_for_app(app: &tauri::AppHandle) -> PathBuf {
+    // In packaged (release) builds the resource_dir contains the bundled pets
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let packaged = resource_dir.join("pets");
+        if packaged.exists() {
+            return packaged;
+        }
+    }
+    // Dev fallback
+    builtin_pets_dir()
+}
+
 fn validate_pet_id(pet_id: &str) -> Result<(), PetError> {
     let path = Path::new(pet_id);
     let mut components = path.components();
@@ -322,7 +338,7 @@ fn scan_pet_dir(dir: &Path, pets: &mut Vec<PetInfo>, seen: &mut std::collections
 }
 
 /// List all available pets (user dir + built-in dir)
-pub async fn list_pets(_app: tauri::AppHandle) -> Result<Vec<PetInfo>, PetError> {
+pub async fn list_pets(app: tauri::AppHandle) -> Result<Vec<PetInfo>, PetError> {
     let mut pets = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -332,14 +348,14 @@ pub async fn list_pets(_app: tauri::AppHandle) -> Result<Vec<PetInfo>, PetError>
     }
 
     // 2. Built-in / example pets (lower priority)
-    let builtin = builtin_pets_dir();
+    let builtin = builtin_pets_dir_for_app(&app);
     scan_pet_dir(&builtin, &mut pets, &mut seen);
 
     Ok(pets)
 }
 
 /// Try to resolve a pet directory from user dir or built-in dir
-fn resolve_pet_dir(pet_id: &str) -> Result<PathBuf, PetError> {
+fn resolve_pet_dir(pet_id: &str, builtin_override: Option<&Path>) -> Result<PathBuf, PetError> {
     validate_pet_id(pet_id)?;
 
     // 1. Check user dirs first
@@ -355,7 +371,11 @@ fn resolve_pet_dir(pet_id: &str) -> Result<PathBuf, PetError> {
     }
 
     // 2. Fall back to built-in dir
-    let builtin = builtin_pets_dir().canonicalize()?;
+    let builtin = match builtin_override {
+        Some(dir) => dir.to_path_buf(),
+        None => builtin_pets_dir(),
+    };
+    let builtin = builtin.canonicalize()?;
     let pet_dir = builtin.join(pet_id);
     if pet_dir.exists() {
         let pet_dir = pet_dir.canonicalize()?;
@@ -368,8 +388,9 @@ fn resolve_pet_dir(pet_id: &str) -> Result<PathBuf, PetError> {
 }
 
 /// Load a specific pet configuration
-pub async fn load_pet_config(pet_id: &str) -> Result<PetConfig, PetError> {
-    let pet_dir = resolve_pet_dir(pet_id)?;
+pub async fn load_pet_config(pet_id: &str, app: &tauri::AppHandle) -> Result<PetConfig, PetError> {
+    let builtin = builtin_pets_dir_for_app(app);
+    let pet_dir = resolve_pet_dir(pet_id, Some(&builtin))?;
 
     let config_path = pet_dir.join("pet.json");
     let content = std::fs::read_to_string(&config_path)?;
@@ -622,12 +643,16 @@ mod tests {
 
     #[test]
     fn resolve_pet_dir_rejects_path_traversal() {
-        assert!(resolve_pet_dir("../claude").is_err());
+        assert!(resolve_pet_dir("../claude", None).is_err());
     }
 
     #[tokio::test]
     async fn load_builtin_claude_resolves_canonical_spritesheet() {
-        let config = load_pet_config("claude").await.unwrap();
+        let builtin = builtin_pets_dir();
+        let pet_dir = resolve_pet_dir("claude", Some(&builtin)).unwrap();
+        let config_path = pet_dir.join("pet.json");
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let config: PetConfig = serde_json::from_str(&content).unwrap();
         let spritesheet = PathBuf::from(config.spritesheet_path);
         assert!(spritesheet.is_absolute());
         assert!(spritesheet.starts_with(builtin_pets_dir().canonicalize().unwrap()));

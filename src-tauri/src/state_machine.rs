@@ -233,7 +233,7 @@ impl PetStateMachine {
     }
 
     pub async fn load_pet(&mut self, pet_id: &str) -> Result<PetConfig, crate::pet::PetError> {
-        let config = load_pet_config(pet_id).await?;
+        let config = load_pet_config(pet_id, &self.app_handle).await?;
 
         // Load custom message map if present
         if !config.message_map.is_empty() {
